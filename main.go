@@ -7,40 +7,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 )
-
-//type server struct{}
-
-//type comes after var name in golang
-//For server to implement http.Handler interface (and be used as that type), need to define ServeHTTP method
-/*
-func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-
-	fmt.Print(r.URL)
-	w.WriteHeader(http.StatusOK)
-	w.Header().Set("Content-Type", "application/json")
-	w.Write([]byte(`{"message": "hello world"}`))
-}
-*/
-
-// All of this thread safety likely isn't necessary as I'm not running a multithreaded server, right?
-// This is wrong!
-// Instead of a mutex, use channels: https://eli.thegreenplace.net/2019/on-concurrency-in-go-http-servers/
-
-//don't capitalize unless you want to export
-/*
-type safeCount struct {
-	v   map[string]int
-	mux sync.Mutex
-}
-
-func (c *safeCount) inc(key string) {
-	c.mux.Lock()
-	c.v[key]++
-	c.mux.Unlock()
-}
-*/
 
 func timeFunc(ticker *time.Ticker, mainCounter *appState) {
 	// empty for is a while
@@ -58,6 +28,26 @@ func timeFunc(ticker *time.Ticker, mainCounter *appState) {
 // trying to manage shared state w/ channels
 // handlers send over shared channel
 // and provide a channel with which they will receive
+
+type headerName int
+
+const (
+	id                  headerName = 0
+	country             headerName = 1
+	description         headerName = 2
+	designation         headerName = 3
+	points              headerName = 4
+	price               headerName = 5
+	province            headerName = 6
+	region1             headerName = 7
+	region2             headerName = 8
+	tasterName          headerName = 9
+	tasterTwitterHandle headerName = 10
+	title               headerName = 11
+	variety             headerName = 12
+	winery              headerName = 13
+)
+
 type appState struct {
 	val1       int
 	val2       int
@@ -68,14 +58,19 @@ type appState struct {
 type cmdType int
 
 const (
-	increment     cmdType = 0
-	updateRecords cmdType = 1
-	getStatus     cmdType = 2
+	increment   cmdType = 0
+	putWine     cmdType = 1
+	getStatus   cmdType = 2
+	getWines    cmdType = 3
+	getWineByID cmdType = 4
 )
 
 type appStateCmd struct {
-	cmd    cmdType
-	record []string
+	cmd        cmdType
+	wineID     int
+	putRecord  []byte
+	startIndex int
+	pageCount  int
 	//lets handler pass in their receiver
 	jsonReceiver chan []byte
 }
@@ -89,6 +84,15 @@ type statusResponse struct {
 	Status string `json:"status"`
 	Ts     string `json:"ts"`
 	Msg    string `json:"msg"`
+}
+
+type wineResponse struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+}
+
+type wineListResponse struct {
+	Wines []wineResponse `json:"wines"`
 }
 
 // counter manager will:
@@ -122,6 +126,40 @@ func startCounterManager(appState *appState) chan<- appStateCmd {
 					respBytes, _ := json.Marshal(resp)
 					cmd.jsonReceiver <- respBytes
 				}
+			case getWines:
+				if (cmd.startIndex < 0) || (cmd.pageCount < 0) {
+					wineList := make([]wineResponse, len(appState.csvRecords))
+					for i, record := range appState.csvRecords {
+						newRecord := wineResponse{ID: record[id], Title: record[title]}
+						wineList[i] = newRecord
+					}
+					resp := wineListResponse{Wines: wineList}
+					respBytes, _ := json.Marshal(resp)
+					cmd.jsonReceiver <- respBytes
+				} else {
+					if cmd.startIndex >= len(appState.csvRecords) {
+						//error condition
+						cmd.jsonReceiver <- []byte(`{"error":"start index larger than record size"}`)
+					} else if (cmd.startIndex + cmd.pageCount) >= len(appState.csvRecords) {
+						// another error condition
+						cmd.jsonReceiver <- []byte(`{"error":"start index + count larger than record size"}`)
+					} else {
+						wineListSlice := appState.csvRecords[cmd.startIndex : cmd.startIndex+cmd.pageCount]
+						wineList := make([]wineResponse, len(wineListSlice))
+						for i, record := range wineListSlice {
+							newRecord := wineResponse{ID: record[id], Title: record[title]}
+							wineList[i] = newRecord
+						}
+						resp := wineListResponse{Wines: wineList}
+						respBytes, _ := json.Marshal(resp)
+						cmd.jsonReceiver <- respBytes
+					}
+
+				}
+			case getWineByID:
+				//
+			case putWine:
+				//
 			}
 		}
 	}()
@@ -137,58 +175,11 @@ func (state *handlerState) home(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "GET":
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"message": "get called"}`))
-		fmt.Println("GET handler home called")
-		handlerChan := make(chan []byte)
-		msg := appStateCmd{cmd: increment, jsonReceiver: handlerChan}
-		state.appStateChan <- msg
-	case "POST":
-		w.WriteHeader(http.StatusCreated)
-		w.Write([]byte(`{"message": "post called"}`))
-	case "PUT":
-		w.WriteHeader(http.StatusAccepted)
-		w.Write([]byte(`{"message": "put called"}`))
-	case "DELETE":
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"message": "delete called"}`))
-	default:
-		w.WriteHeader(http.StatusNotFound)
-		w.Write([]byte(`{"message": "not found"}`))
-	}
-}
-
-func (state *handlerState) favicon(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	switch r.Method {
-	case "GET":
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"message": "favicon get called"}`))
-		fmt.Println("favicon")
-	case "POST":
-		w.WriteHeader(http.StatusCreated)
-		w.Write([]byte(`{"message": "post called"}`))
-	case "PUT":
-		w.WriteHeader(http.StatusAccepted)
-		w.Write([]byte(`{"message": "put called"}`))
-	case "DELETE":
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"message": "delete called"}`))
-	default:
-		w.WriteHeader(http.StatusNotFound)
-		w.Write([]byte(`{"message": "not found"}`))
-	}
-}
-
-func (state *handlerState) test(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	switch r.Method {
-	case "GET":
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"message": "test get called"}`))
-		fmt.Println("GET handler test called")
-		handlerChan := make(chan []byte)
-		msg := appStateCmd{cmd: increment, jsonReceiver: handlerChan}
-		state.appStateChan <- msg
+		w.Write([]byte(`{"message": "default handler called"}`))
+		fmt.Println("default handler home called - will not increment")
+		//handlerChan := make(chan []byte)
+		//msg := appStateCmd{cmd: increment, jsonReceiver: handlerChan}
+		//state.appStateChan <- msg
 	case "POST":
 		w.WriteHeader(http.StatusCreated)
 		w.Write([]byte(`{"message": "post called"}`))
@@ -209,6 +200,77 @@ func (state *handlerState) status(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "GET":
 		fmt.Println("GET handler status called")
+		handlerChan := make(chan []byte)
+		msg := appStateCmd{cmd: getStatus, jsonReceiver: handlerChan}
+		state.appStateChan <- msg
+		resp := <-handlerChan
+		fmt.Printf("resp is: %s", resp)
+		w.WriteHeader(http.StatusOK)
+		w.Write(resp)
+	case "POST":
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte(`{"message": "post called"}`))
+	case "PUT":
+		w.WriteHeader(http.StatusAccepted)
+		w.Write([]byte(`{"message": "put called"}`))
+	case "DELETE":
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"message": "delete called"}`))
+	default:
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"message": "not found"}`))
+	}
+}
+
+func (state *handlerState) getWines(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	switch r.Method {
+	case "GET":
+		startStr := r.URL.Query().Get("start")
+		count := -1
+		start := -1
+		if startStr != "" {
+			fmt.Println("start index present")
+			start, _ = strconv.Atoi(startStr)
+		}
+		countStr := r.URL.Query().Get("count")
+		if countStr != "" {
+			fmt.Println("page count present")
+			count, _ = strconv.Atoi(countStr)
+		}
+
+		fmt.Println("GET handler wines called")
+		handlerChan := make(chan []byte)
+		msg := appStateCmd{cmd: getWines, jsonReceiver: handlerChan, pageCount: count, startIndex: start}
+		state.appStateChan <- msg
+		resp := <-handlerChan
+		w.WriteHeader(http.StatusOK)
+		w.Write(resp)
+	case "POST":
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte(`{"message": "post called"}`))
+	case "PUT":
+		w.WriteHeader(http.StatusAccepted)
+		w.Write([]byte(`{"message": "put called"}`))
+	case "DELETE":
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"message": "delete called"}`))
+	default:
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"message": "not found"}`))
+	}
+}
+
+func (state *handlerState) getWineByID(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	switch r.Method {
+	case "GET":
+		fmt.Println("GET handler winebyid called")
+		fmt.Println(r.URL.Path)
+		pathSplit := strings.Split(r.URL.Path, "/")
+		// maybe error if path is nested wrong. should have used a routing package
+		id := pathSplit[len(pathSplit)-1]
+		fmt.Println(id)
 		handlerChan := make(chan []byte)
 		msg := appStateCmd{cmd: getStatus, jsonReceiver: handlerChan}
 		state.appStateChan <- msg
@@ -264,9 +326,9 @@ func main() {
 
 	// investigate better approaches to giving these funcs access to appStateChan
 	http.HandleFunc("/", handlerState.home) // also serves as default handler
-	http.HandleFunc("/favicon.ico", handlerState.favicon)
-	http.HandleFunc("/test", handlerState.test)
 	http.HandleFunc("/status", handlerState.status)
+	http.HandleFunc("/wine", handlerState.getWines)
+	http.HandleFunc("/wine/", handlerState.getWineByID)
 
 	defer ticker.Stop() // are defers necessary in main?
 	defer close(handlerState.appStateChan)
