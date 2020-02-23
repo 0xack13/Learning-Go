@@ -12,14 +12,20 @@ import (
 	"time"
 )
 
-func timeFunc(ticker *time.Ticker, mainCounter *appState) {
-	// empty for is a while
+func timeFunc(ticker *time.Ticker, appState *appState) {
+	//prevSuccess := 0
+	//prevErrors := 0
+	prevRequests := 0
+	//prevAvailability := 0
 	for {
 		select {
 		case <-ticker.C:
+			requests := appState.requests
+			minuteRequests := requests - prevRequests
+			prevRequests = requests
+			fmt.Printf("requests this minute: %d\n", minuteRequests)
+			fmt.Printf("number of wines: %d\n", len(appState.csvRecords))
 			fmt.Println("Timer Called")
-			fmt.Println(mainCounter.val1)
-			fmt.Println(mainCounter.val2)
 			fmt.Fprintf(os.Stderr, "err test")
 		}
 	}
@@ -29,6 +35,7 @@ func timeFunc(ticker *time.Ticker, mainCounter *appState) {
 // handlers send over shared channel
 // and provide a channel with which they will receive
 
+// named indeces for csv rows
 type headerName int
 
 const (
@@ -48,33 +55,41 @@ const (
 	winery              headerName = 13
 )
 
-type appState struct {
-	val1       int
-	val2       int
-	csvRecords [][]string
-	status     bool
-}
-
+//cmd types handlers might send over channel
 type cmdType int
 
 const (
-	increment   cmdType = 0
-	putWine     cmdType = 1
-	getStatus   cmdType = 2
-	getWines    cmdType = 3
-	getWineByID cmdType = 4
+	incrementRequests  cmdType = 0
+	incrementErrors    cmdType = 1
+	incrementSuccesses cmdType = 2
+	putWine            cmdType = 3
+	getStatus          cmdType = 4
+	getWines           cmdType = 5
+	getWineByID        cmdType = 6
 )
 
-type appStateCmd struct {
-	cmd        cmdType
-	wineID     int
-	putRecord  []byte
-	startIndex int
-	pageCount  int
-	//lets handler pass in their receiver
-	jsonReceiver chan []byte
+// app-wide state that needs synchronized access
+type appState struct {
+	requests     int
+	successes    int
+	errors       int
+	availability int
+	numWines     int
+	csvRecords   [][]string
+	status       bool
 }
 
+// cmd to send to the appState handler
+type appStateCmd struct {
+	cmd          cmdType
+	wineID       int
+	putRecord    putWineData
+	startIndex   int
+	pageCount    int
+	jsonReceiver chan *appStateResponse
+}
+
+// give handlers access to the appState manager's channel
 type handlerState struct {
 	appStateChan chan<- appStateCmd
 }
@@ -95,10 +110,31 @@ type wineListResponse struct {
 	Wines []wineResponse `json:"wines"`
 }
 
+type appStateResponse struct {
+	success bool
+	message string
+	payload []byte
+}
+
+type putWineData struct {
+	Country             string `json:"country"`
+	Description         string `json:"description"`
+	Designation         string `json:"designation"`
+	Points              string `json:"points"`
+	Price               string `json:"price"`
+	Province            string `json:"province"`
+	Region1             string `json:"region_1"`
+	Region2             string `json:"region_2"`
+	TasterName          string `json:"taster_name"`
+	TasterTwitterHandle string `json:"taster_twitter_handle"`
+	Title               string `json:"title"`
+	Variety             string `json:"variety"`
+	Winery              string `json:"winery"`
+}
+
 // counter manager will:
-// - initialize state
-// - start a goroutine
-// - return a channel
+// - start a goroutine that listens on a channel to requests to touch app state
+// - return that channel
 func startCounterManager(appState *appState) chan<- appStateCmd {
 
 	appStateChan := make(chan appStateCmd)
@@ -108,117 +144,121 @@ func startCounterManager(appState *appState) chan<- appStateCmd {
 		// has access to appStateChan via closure
 		for cmd := range appStateChan {
 			switch cmd.cmd {
-			case increment:
-				fmt.Println("Receiving on counter channel")
-				appState.val1++
-				appState.val2 += 10
+			case incrementRequests:
+				appState.requests++
+			case incrementSuccesses:
+				appState.successes++
+			case incrementErrors:
+				appState.errors++
 			case getStatus:
 				t := time.Now()
 				ts := t.Format(time.RFC3339)
 				if appState.status {
-					fmt.Println("sending success status")
 					resp := &statusResponse{Status: "ok", Msg: "", Ts: ts}
-					respBytes, _ := json.Marshal(resp)
-					cmd.jsonReceiver <- respBytes
+					respBytes, err := json.Marshal(resp)
+					if err != nil {
+						cmd.jsonReceiver <- &appStateResponse{success: false, message: "json marshalling error"}
+					}
+					cmd.jsonReceiver <- &appStateResponse{success: true, message: "", payload: respBytes}
+
 				} else {
-					fmt.Println("sending failure status")
 					resp := &statusResponse{Status: "error", Msg: "failed to load csv", Ts: ts}
-					respBytes, _ := json.Marshal(resp)
-					cmd.jsonReceiver <- respBytes
+					respBytes, err := json.Marshal(resp)
+					if err != nil {
+						cmd.jsonReceiver <- &appStateResponse{success: false, message: "json marshalling error"}
+					}
+					cmd.jsonReceiver <- &appStateResponse{success: true, message: "", payload: respBytes}
 				}
 			case getWines:
 				if (cmd.startIndex < 0) || (cmd.pageCount < 0) {
-					wineList := make([]wineResponse, len(appState.csvRecords))
-					for i, record := range appState.csvRecords {
+					wineList := make([]wineResponse, len(appState.csvRecords[1:]))
+					for i, record := range appState.csvRecords[1:] {
 						newRecord := wineResponse{ID: record[id], Title: record[title]}
 						wineList[i] = newRecord
 					}
 					resp := wineListResponse{Wines: wineList}
 					respBytes, _ := json.Marshal(resp)
-					cmd.jsonReceiver <- respBytes
+					cmd.jsonReceiver <- &appStateResponse{success: true, message: "", payload: respBytes}
 				} else {
-					if cmd.startIndex >= len(appState.csvRecords) {
-						//error condition
-						cmd.jsonReceiver <- []byte(`{"error":"start index larger than record size"}`)
-					} else if (cmd.startIndex + cmd.pageCount) >= len(appState.csvRecords) {
-						// another error condition
-						cmd.jsonReceiver <- []byte(`{"error":"start index + count larger than record size"}`)
+					if cmd.startIndex > len(appState.csvRecords[1:]) {
+						cmd.jsonReceiver <- &appStateResponse{success: false, message: "index out of range"}
+					} else if (cmd.startIndex + cmd.pageCount) > len(appState.csvRecords[1:]) {
+						cmd.jsonReceiver <- &appStateResponse{success: false, message: "index + count out of range"}
 					} else {
-						wineListSlice := appState.csvRecords[cmd.startIndex : cmd.startIndex+cmd.pageCount]
+						wineListSlice := appState.csvRecords[cmd.startIndex+1 : cmd.startIndex+cmd.pageCount+1]
 						wineList := make([]wineResponse, len(wineListSlice))
 						for i, record := range wineListSlice {
 							newRecord := wineResponse{ID: record[id], Title: record[title]}
 							wineList[i] = newRecord
 						}
 						resp := wineListResponse{Wines: wineList}
-						respBytes, _ := json.Marshal(resp)
-						cmd.jsonReceiver <- respBytes
+						respBytes, err := json.Marshal(resp)
+						if err != nil {
+							cmd.jsonReceiver <- &appStateResponse{success: false, message: "json marshalling error"}
+						}
+						cmd.jsonReceiver <- &appStateResponse{success: true, message: "", payload: respBytes}
 					}
 
 				}
 			case getWineByID:
-				//
+				if (cmd.wineID < 0) || (cmd.wineID >= (len(appState.csvRecords) - 1)) {
+					cmd.jsonReceiver <- &appStateResponse{success: false, message: "id not available"}
+				} else {
+					wine := appState.csvRecords[cmd.wineID+1]
+					resp := wineResponse{ID: wine[id], Title: wine[title]}
+					respBytes, err := json.Marshal(resp)
+					if err != nil {
+						cmd.jsonReceiver <- &appStateResponse{success: false, message: "json marshalling error"}
+					}
+					cmd.jsonReceiver <- &appStateResponse{success: true, message: "", payload: respBytes}
+				}
+
 			case putWine:
-				//
+				wineToPut := cmd.putRecord
+				lenString := strconv.Itoa(len(appState.csvRecords) - 1)
+				fmt.Println(lenString)
+				newRecord := make([]string, 14)
+				newRecord[id] = lenString
+				newRecord[country] = wineToPut.Country
+				newRecord[description] = wineToPut.Description
+				newRecord[designation] = wineToPut.Designation
+				newRecord[points] = wineToPut.Points
+				newRecord[price] = wineToPut.Price
+				newRecord[province] = wineToPut.Province
+				newRecord[region1] = wineToPut.Region1
+				newRecord[region2] = wineToPut.Region2
+				newRecord[tasterName] = wineToPut.TasterName
+				newRecord[tasterTwitterHandle] = wineToPut.TasterTwitterHandle
+				newRecord[title] = wineToPut.Title
+				newRecord[variety] = wineToPut.Variety
+				newRecord[winery] = wineToPut.Winery
+				appState.csvRecords = append(appState.csvRecords, newRecord)
+				cmd.jsonReceiver <- &appStateResponse{success: true, message: "", payload: []byte(`{"status":"successful put"}`)}
 			}
 		}
 	}()
 	return appStateChan
 }
 
-// global until i figure the right approach: https://stackoverflow.com/questions/26211954/how-do-i-pass-arguments-to-my-handler
-//var appStateChan = startCounterManager()
-
-// straight func, no method signature
-func (state *handlerState) home(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	switch r.Method {
-	case "GET":
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"message": "default handler called"}`))
-		fmt.Println("default handler home called - will not increment")
-		//handlerChan := make(chan []byte)
-		//msg := appStateCmd{cmd: increment, jsonReceiver: handlerChan}
-		//state.appStateChan <- msg
-	case "POST":
-		w.WriteHeader(http.StatusCreated)
-		w.Write([]byte(`{"message": "post called"}`))
-	case "PUT":
-		w.WriteHeader(http.StatusAccepted)
-		w.Write([]byte(`{"message": "put called"}`))
-	case "DELETE":
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"message": "delete called"}`))
-	default:
-		w.WriteHeader(http.StatusNotFound)
-		w.Write([]byte(`{"message": "not found"}`))
-	}
-}
-
 func (state *handlerState) status(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	switch r.Method {
 	case "GET":
-		fmt.Println("GET handler status called")
-		handlerChan := make(chan []byte)
+		handlerChan := make(chan *appStateResponse)
 		msg := appStateCmd{cmd: getStatus, jsonReceiver: handlerChan}
 		state.appStateChan <- msg
+
 		resp := <-handlerChan
-		fmt.Printf("resp is: %s", resp)
-		w.WriteHeader(http.StatusOK)
-		w.Write(resp)
-	case "POST":
-		w.WriteHeader(http.StatusCreated)
-		w.Write([]byte(`{"message": "post called"}`))
-	case "PUT":
-		w.WriteHeader(http.StatusAccepted)
-		w.Write([]byte(`{"message": "put called"}`))
-	case "DELETE":
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"message": "delete called"}`))
+		if resp.success {
+			w.WriteHeader(http.StatusOK)
+			w.Write(resp.payload)
+		} else {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(resp.message))
+		}
 	default:
-		w.WriteHeader(http.StatusNotFound)
-		w.Write([]byte(`{"message": "not found"}`))
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		w.Write([]byte(`{"message": "not allowed"}`))
 	}
 }
 
@@ -240,24 +280,46 @@ func (state *handlerState) getWines(w http.ResponseWriter, r *http.Request) {
 		}
 
 		fmt.Println("GET handler wines called")
-		handlerChan := make(chan []byte)
+		//handlerChan := make(chan []byte)
+		handlerChan := make(chan *appStateResponse)
 		msg := appStateCmd{cmd: getWines, jsonReceiver: handlerChan, pageCount: count, startIndex: start}
 		state.appStateChan <- msg
+
 		resp := <-handlerChan
-		w.WriteHeader(http.StatusOK)
-		w.Write(resp)
-	case "POST":
-		w.WriteHeader(http.StatusCreated)
-		w.Write([]byte(`{"message": "post called"}`))
+		if resp.success {
+			w.WriteHeader(http.StatusOK)
+			w.Write(resp.payload)
+		} else {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(resp.message))
+		}
 	case "PUT":
-		w.WriteHeader(http.StatusAccepted)
-		w.Write([]byte(`{"message": "put called"}`))
-	case "DELETE":
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"message": "delete called"}`))
+		decoder := json.NewDecoder(r.Body)
+		var myData putWineData
+		err := decoder.Decode(&myData)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`{"message":"couldn't decode json"}`))
+		}
+		fmt.Println(myData)
+		fmt.Println(myData.Winery)
+
+		handlerChan := make(chan *appStateResponse)
+		msg := appStateCmd{cmd: putWine, jsonReceiver: handlerChan, putRecord: myData}
+		state.appStateChan <- msg
+
+		resp := <-handlerChan
+		if resp.success {
+			w.WriteHeader(http.StatusAccepted)
+			w.Write(resp.payload)
+		} else {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(resp.message))
+		}
+
 	default:
-		w.WriteHeader(http.StatusNotFound)
-		w.Write([]byte(`{"message": "not found"}`))
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		w.Write([]byte(`{"message": "not allowed"}`))
 	}
 }
 
@@ -265,40 +327,31 @@ func (state *handlerState) getWineByID(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	switch r.Method {
 	case "GET":
-		fmt.Println("GET handler winebyid called")
-		fmt.Println(r.URL.Path)
 		pathSplit := strings.Split(r.URL.Path, "/")
-		// maybe error if path is nested wrong. should have used a routing package
-		id := pathSplit[len(pathSplit)-1]
+		id, err := strconv.Atoi(pathSplit[len(pathSplit)-1])
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`{"message":"couldn't prase out id from path"}`))
+		}
 		fmt.Println(id)
-		handlerChan := make(chan []byte)
-		msg := appStateCmd{cmd: getStatus, jsonReceiver: handlerChan}
+		handlerChan := make(chan *appStateResponse)
+		msg := appStateCmd{cmd: getWineByID, jsonReceiver: handlerChan, wineID: id}
 		state.appStateChan <- msg
 		resp := <-handlerChan
-		fmt.Printf("resp is: %s", resp)
-		w.WriteHeader(http.StatusOK)
-		w.Write(resp)
-	case "POST":
-		w.WriteHeader(http.StatusCreated)
-		w.Write([]byte(`{"message": "post called"}`))
-	case "PUT":
-		w.WriteHeader(http.StatusAccepted)
-		w.Write([]byte(`{"message": "put called"}`))
-	case "DELETE":
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"message": "delete called"}`))
+		if resp.success {
+			w.WriteHeader(http.StatusOK)
+			w.Write(resp.payload)
+		} else {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(resp.message))
+		}
 	default:
-		w.WriteHeader(http.StatusNotFound)
-		w.Write([]byte(`{"message": "not found"}`))
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		w.Write([]byte(`{"message": "not allowed"}`))
 	}
 }
 
 func main() {
-	// reference to a server struct??
-	//s := &server{}
-
-	//http.Handle("/", s)
-
 	csvError := false
 	csvfile, err := os.Open("./winemag-data-130k-v2.csv")
 	if err != nil {
@@ -312,7 +365,7 @@ func main() {
 		csvError = true
 	}
 
-	appState := &appState{val1: 0, val2: 0, csvRecords: records, status: !csvError}
+	appState := &appState{csvRecords: records, status: !csvError}
 	fmt.Println("records:", len(records))
 
 	ticker := time.NewTicker(time.Second * 5)
@@ -325,7 +378,6 @@ func main() {
 		appStateChan: startCounterManager(appState)}
 
 	// investigate better approaches to giving these funcs access to appStateChan
-	http.HandleFunc("/", handlerState.home) // also serves as default handler
 	http.HandleFunc("/status", handlerState.status)
 	http.HandleFunc("/wine", handlerState.getWines)
 	http.HandleFunc("/wine/", handlerState.getWineByID)
