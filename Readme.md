@@ -31,7 +31,8 @@ docker run -p 8080:8080 --rm go-wine
 
 ## My Thoughts
 
-This was my first experience with Go, so most of the time spent went into getting familiar with the language and its paradigms. I feel like I managed to take advantage of goroutines and channels to avoid race conditions (multiple http handlers/threads incrementing counters, modifying the records) in an idiomatic way. But by sharing a channel to a single state manager among the http handlers (it will block access to _all_ synchronized state on every msg), I made things far slower than necessary. I'd fix that with with mutliple channels or something with more time. But the server should avoid race conditions and I avoided falling back on mutexes.
+This was my first experience with Go, so most of the time spent went into getting familiar with the language and its paradigms. I feel like I managed to take advantage of goroutines and channels to avoid race conditions (multiple http handlers/threads incrementing counters, modifying the records) in an idiomatic way. But by sharing a channel to a single state manager among the http handlers (it will block access to _all_ synchronized state on every msg), I made things far slower than necessary. I'd fix that with with mutliple channels or something with more time. But the server should avoid race conditions and I avoided falling back on mutexes. This was my first attempt at "sharing memory by communicating"
+- https://blog.golang.org/share-memory-by-communicating
 
 I added receivers to the handler funcs to make them methods on a struct containing the state I needed to get into them. Being new to Go, this felt like such an odd way to get state into a function. But at least it wasn't global. The way Go's methods & function receivers work is really unique. I didn't go looking for reasons to use interfaces or type assertions.
 
