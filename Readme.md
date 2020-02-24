@@ -1,4 +1,4 @@
-# A Simple Wine API in Go
+# A Simple Go API with a Wine Dataset
 
 ## Available Endpoints
 - GET /status
