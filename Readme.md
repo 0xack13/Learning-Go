@@ -17,7 +17,8 @@
 - PUT /wine
   - Body should contain json formatted wine obj minus the id
    ```
-  curl -X PUT -X "application/json" -d '{"country":"US","description":"this is a wine","designation":"delicious","points":"104.9","price":"a lot","province":"here","region_1":"north","region_2":"carolina","taster_name":"Jazz Jackrabbit","taster_twitter_handle":"@jazzjackrabbit","title":"new wine","variety":"the spice of life","winery":"martha's vineyard"}' http://localhost:8080/wine```
+  curl -X PUT -X "application/json" -d '{"country":"US","description":"this is a wine","designation":"delicious","points":"104.9","price":"a lot","province":"here","region_1":"north","region_2":"carolina","taster_name":"Jazz Jackrabbit","taster_twitter_handle":"@jazzjackrabbit","title":"new wine","variety":"the spice of life","winery":"martha's vineyard"}' http://localhost:8080/wine
+   ```
 
 ## Build and run
 Just run docker build in the source directory.
