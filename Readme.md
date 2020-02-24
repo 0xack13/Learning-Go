@@ -1,6 +1,6 @@
 # A Simple Wine API in Go
 
-## Endpoint Examples
+## Available Endpoints
 - GET /status
    ```
    curl -X GET -H "Content-Type: application/json" http://localhost:8080/status
@@ -31,8 +31,8 @@ docker run -p 8080:8080 --rm go-wine
 
 ## My Thoughts
 
-This was my first time wokring with Go, so most of the time spent went into getting familiar with the language and its paradigms. I feel like I managed to take advantage of goroutines and channels to avoid race conditions (multiple http handlers/threads incrementing counters, modifying the records) in an idiomatic way. But by sharing a channel to a single state manager among the http handlers (it will block access to _all_ synchronized state on every msg), I made things slower than necessary. I'd fix that with more time, but the server should avoid race conditions and I avoided falling back on mutexes.
+This was my first time working with Go, so most of the time spent went into getting familiar with the language and its paradigms. I feel like I managed to take advantage of goroutines and channels to avoid race conditions (multiple http handlers/threads incrementing counters, modifying the records) in an idiomatic way. But by sharing a channel to a single state manager among the http handlers (it will block access to _all_ synchronized state on every msg), I made things slower than necessary. I'd fix that with more time, but the server should avoid race conditions and I avoided falling back on mutexes.
 
 I added a receiver to the handler funcs to make them methods on a struct containing the state I needed to get into them. This felt like such an odd way to inject state into the handlers, but at least it wasn't global. The way Go's methods & function receivers work is really unique. I didn't go looking for reasons to use interfaces or type assertions.
 
-If I had more time, I definitely would have modularized the project. I also might have found a real persistence solution for the data. Using Docker compose and throwing a postgres contianer into the mix would work, but ideally I'd target something on Azure/AWS and include a terrafrom module.
+If I had more time, I definitely would have modularized the project. I also might have found a real persistence solution for the data. Using Docker compose and throwing a postgres container into the mix would work, but ideally I'd target something on Azure/AWS and include a terraform module.
